@@ -150,7 +150,7 @@ DPAPI 保护本机保存的密码。本项目按现有门户的 HTTP 接口提�
 ```powershell
 python -m venv .venv
 ./.venv/Scripts/python.exe -m pip install -r requirements-build.txt
-./build.ps1 -Python ./.venv/Scripts/python.exe -Version v1.0.1
+./build.ps1 -Python ./.venv/Scripts/python.exe -Version v1.0.2
 ```
 
 成品位于 `dist/`，包括 Windows ZIP 和 SHA256 校验文件。打包采用文件白名单，不会收集 `config.json`、`cache.json` 或日志。

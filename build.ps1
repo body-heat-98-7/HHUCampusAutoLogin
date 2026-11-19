@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^v?\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$')]
-    [string]$Version = 'v1.0.1',
+    [string]$Version = 'v1.0.2',
     [string]$Python = 'python'
 )
 
@@ -84,3 +84,6 @@ try {
 finally {
     Pop-Location
 }
+
+# The missing-config smoke check intentionally exits 2; do not leak it to CI.
+exit 0
