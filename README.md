@@ -6,7 +6,8 @@
 
 ## 特性
 
-- **掉线自动重连**：计划任务默认每 2 分钟巡检，发现掉线后尝试认证
+- **断线秒级恢复**：除了每 2 分钟兜底巡检，还注册了「网络已连接」事件触发，Wi-Fi 重连后**约 1 秒**就会重新认证（实测 0.6 秒）
+- **切网自动修复 DHCP**：从手机热点切回校园网时，Windows 常拿旧租约去续租而被服务器拒绝（DHCPNAK），表现就是"连上 WiFi 却一直没 IP"。脚本检测到"连着校园 SSID 但 IP 不属于校园网段"时会自动释放并重取租约
 - **换网段自适应**：`queryString` 绑定本机 IP，脚本每次从网关跳转页实时抓取，换 AP / 换楼不会失效
 - **密码 DPAPI 加密**：用当前 Windows 用户凭据加密，拷走配置文件也解不开
 - **跳过其他网络**：先检查本机地址和门户可达性，未识别为校园网时跳过认证
@@ -70,6 +71,7 @@ python auto_login.py install    # 安装计划任务（每 2 分钟一次）
 | `portal_host` | 门户域名，默认 `eportal.hhu.edu.cn` |
 | `portal_ip` | 门户 IP，默认 `10.96.0.155`（掉线时 DNS 不可用，必须直连 IP） |
 | `campus_ip_prefix` | 校园网段前缀，默认 `10.` |
+| `campus_ssid` | 校园 WiFi 名称，默认 `Hohai University`。只有连在这个 SSID 上才会自动重取 DHCP，避免误伤其他网络 |
 | `username` | 学号 |
 | `password` / `password_scheme` | DPAPI 密文，或 `plain` 明文（非 Windows） |
 | `service` | 运营商服务名，见下 |
@@ -130,6 +132,32 @@ Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Setti
 ```
 
 把 `ProxyEnable` 设为 0，或把 `*.hhu.edu.cn` 加入代理绕过列表。
+
+**Q：从手机热点切回校园网，连上了却上不了网**
+这是 Windows 的 DHCP 行为：切回来时它拿着上一次的租约去续，被服务器拒绝（`DHCPNAK`），
+在你手动重连或等它重新发现 DHCP 之前一直拿不到 IP。判定方法：
+
+```powershell
+Get-WinEvent -LogName "Microsoft-Windows-Dhcp-Client/Admin" -MaxEvents 10 |
+    Where-Object { $_.Id -eq 1002 }
+```
+
+脚本已内置处理：当它发现"连着校园 SSID（`campus_ssid`）但 IP 不在 `campus_ip_prefix` 网段"，
+会自动执行 `ipconfig /release` + `/renew` 重取租约，随后完成认证。
+另外，任务里注册了「网络已连接」事件触发器，Wi-Fi 重连后约 1 秒就会重新认证。
+
+**Q：用着用着会断几秒再自动连上**
+先分清是"Wi-Fi 链路断了"还是"认证掉了"：
+
+```powershell
+Get-WinEvent -LogName "Microsoft-Windows-WLAN-AutoConfig/Operational" -MaxEvents 30 |
+    Where-Object { $_.Id -eq 8003 }   # 8003 = 无线网络断开
+```
+
+- 有大量 8003，说明是无线链路层断开（驱动省电、漫游、AP 侧踢）。可尝试在设备管理器里
+  关闭无线网卡的"允许计算机关闭此设备以节约电源"，或更新无线网卡驱动。
+- 没有 8003 但认证掉了，属于门户 session 到期。事件触发器+巡检会在 1 秒内重新认证，
+  在线期间也会按间隔发 `keepalive` 续期。
 
 **Q：日志报"服务名不对"**
 双击 `install.cmd` 或运行程序的 `setup` 命令，重新选择运营商。

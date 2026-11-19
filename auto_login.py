@@ -71,6 +71,7 @@ DEFAULT_CONFIG = {
     "password_scheme": "dpapi",   # dpapi | plain
     "password": "",
     "service": "校园外网服务(out-campus NET)",
+    "campus_ssid": "Hohai University",
     "interval_minutes": 2,
 }
 
@@ -105,6 +106,19 @@ def save_json(path, data):
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
     os.replace(tmp, path)
+
+
+def current_ssid():
+    """当前连着的 WiFi 名字；未连接或非 Windows 返回空串。"""
+    if not IS_WINDOWS:
+        return ""
+    try:
+        out = subprocess.run(["netsh", "wlan", "show", "interfaces"],
+                             capture_output=True, timeout=10).stdout
+        m = re.search(r"^\s*SSID\s*:\s*(.+)$", out.decode("gbk", "replace"), re.M)
+        return m.group(1).strip() if m else ""
+    except Exception:
+        return ""
 
 
 def validate_config(cfg, require_credentials=True):
@@ -215,14 +229,42 @@ class Portal:
     def on_campus(self):
         ip = self.local_ip()
         if not ip.startswith(self.cfg.get("campus_ip_prefix", "10.")):
-            log.debug("本机地址 %s 不在校园网段，跳过", ip or "未知")
-            return False
+            # 从手机热点切回校园网时，Windows 会拿旧租约去续，常被 DHCP 服务器拒绝
+            # （DHCPNAK），表现就是"连上 WiFi 了但一直没有 IP"。这里主动重取一次。
+            if self._renew_dhcp(ip):
+                ip = self.local_ip()
+            if not ip.startswith(self.cfg.get("campus_ip_prefix", "10.")):
+                log.debug("本机地址 %s 不在校园网段，跳过", ip or "未知")
+                return False
         for target in (self.ip, self.host):
             try:
                 with socket.create_connection((target, 80), timeout=3):
                     return True
             except Exception:
                 continue
+        return False
+
+    def _renew_dhcp(self, ip):
+        """只在"确实连在校园 SSID 上、但 IP 不属于校园网段"时动 DHCP。"""
+        wanted = (self.cfg.get("campus_ssid") or "").strip()
+        ssid = current_ssid()
+        if not wanted or ssid != wanted:
+            return False
+        log.info("已连上 %s，但 IP 是 %s，尝试重新获取 DHCP 租约", ssid, ip or "无")
+        try:
+            subprocess.run(["ipconfig", "/release"], capture_output=True, timeout=20)
+            subprocess.run(["ipconfig", "/renew"], capture_output=True, timeout=45)
+        except Exception as e:
+            log.debug("ipconfig 执行失败: %s", e)
+            return False
+        prefix = self.cfg.get("campus_ip_prefix", "10.")
+        deadline = time.time() + 25
+        while time.time() < deadline:
+            if self.local_ip().startswith(prefix):
+                log.info("已重新拿到校园网 IP")
+                return True
+            time.sleep(2)
+        log.warning("重新获取 IP 超时")
         return False
 
     def is_online(self, timeout=5):
@@ -415,33 +457,58 @@ def _task_command():
     return '"%s" "%s"' % (_pythonw(), os.path.abspath(__file__))
 
 
+
+
 def cmd_install(cfg, task_name=DEFAULT_TASK_NAME):
     if not IS_WINDOWS:
         print("非 Windows 平台，请用 cron 定时执行本脚本，例如：\n"
-              "  0 * * * * /usr/bin/python3 %s >/dev/null 2>&1" % os.path.abspath(__file__))
+              "  */2 * * * * /usr/bin/python3 %s >/dev/null 2>&1" % os.path.abspath(__file__))
         return 1
 
     validate_config(cfg)
-    minutes = cfg["interval_minutes"]
+    minutes = int(cfg["interval_minutes"])
     tr = _task_command()
+    event_task = task_name + "-OnConnect"
+
+    # 1) 定时兜底
     r = subprocess.run(["schtasks", "/Create", "/TN", task_name, "/TR", tr,
                         "/SC", "MINUTE", "/MO", str(minutes), "/F"],
                        capture_output=True)
-    out = (r.stdout + r.stderr).decode("gbk", "replace").strip()
-    print(out)
+    print((r.stdout + r.stderr).decode("gbk", "replace").strip())
     if r.returncode != 0:
         return 1
-    print("\n已安装计划任务 %s，每 %d 分钟检查一次。" % (task_name, minutes))
-    print("立即试运行一次…")
+
+    # 2) 网络一连上就立刻跑一次，避免"断几秒要等下一轮巡检"
+    r2 = subprocess.run(["schtasks", "/Create", "/TN", event_task, "/TR", tr,
+                         "/SC", "ONEVENT",
+                         "/EC", "Microsoft-Windows-NetworkProfile/Operational",
+                         "/MO", "*[System[EventID=10000]]", "/F"],
+                        capture_output=True)
+    event_ok = r2.returncode == 0
+    print((r2.stdout + r2.stderr).decode("gbk", "replace").strip())
+
+    print("\n已安装：")
+    print("  · %s —— 每 %d 分钟兜底巡检" % (task_name, minutes))
+    if event_ok:
+        print("  · %s —— 网络连上时立即触发（断线恢复是秒级）" % event_task)
+    else:
+        print("  · 事件触发器安装失败，仅靠定时巡检（最慢 %d 分钟恢复）" % minutes)
+
+    print("\n立即试运行一次…")
     if cmd_login(cfg) != 0:
         print("提示：计划任务已安装，但本次认证未成功。请检查日志或重新配置账号。")
     return 0
 
 
 def cmd_uninstall(task_name=DEFAULT_TASK_NAME):
-    r = subprocess.run(["schtasks", "/Delete", "/TN", task_name, "/F"], capture_output=True)
-    print((r.stdout + r.stderr).decode("gbk", "replace").strip())
-    return 0 if r.returncode == 0 else 1
+    ok = True
+    for name in (task_name, task_name + "-OnConnect"):
+        r = subprocess.run(["schtasks", "/Delete", "/TN", name, "/F"], capture_output=True)
+        out = (r.stdout + r.stderr).decode("gbk", "replace").strip()
+        print(out)
+        if r.returncode != 0 and "找不到" not in out and "cannot find" not in out.lower():
+            ok = False
+    return 0 if ok else 1
 
 
 # ================================================================= 配置向导

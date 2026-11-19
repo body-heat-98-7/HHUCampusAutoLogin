@@ -2,6 +2,7 @@
   "portal_host": "eportal.hhu.edu.cn",
   "portal_ip": "10.96.0.155",
   "campus_ip_prefix": "10.",
+  "campus_ssid": "Hohai University",
   "username": "",
   "password_scheme": "dpapi",
   "password": "",
