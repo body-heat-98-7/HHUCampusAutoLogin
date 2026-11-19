@@ -604,7 +604,7 @@ def cmd_setup():
         val = input("%s%s: " % (label, tip)).strip()
         return val or cur
 
-    print("\n【门户地址】一般不用改，换校区才需要")
+    print("\n【门户地址】直接回车即可（只有换校区才需要改）")
     cfg["portal_host"] = ask("portal_host")
     cfg["portal_ip"] = ask("portal_ip")
 
