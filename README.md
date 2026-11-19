@@ -1,14 +1,15 @@
 # HHUCampusAutoLogin
 水之子们好！\
-河海sb校园网困扰我们已久，想要找自动连接脚本却发现都是前辈们的旧代码，使用起来效果不理想。，本人调教了dsh和gpt3天，并结合了前辈们开源的部分代码，搓出来了这一款自动连接脚本\
+河海sb校园网困扰我们已久，想要找自动连接脚本却发现都是前辈们的旧代码，使用起来效果不理想，本人调教了dsh和gpt3天，并结合了前辈们开源的部分代码，搓出来了这一款自动连接脚本\
 该脚本考虑了多种连接可能性，包括开机自启，热点切校园网，windows网络自动断连等，大部分情况均可自连\
 做了傻瓜式安装，根据指引一步步操作即可（你也可以把网址丢给dsh让它帮你装）\
 大部分常见事项都在下面，仔细看就行\
 纯 Python 标准库实现：**不需要浏览器、不需要 chromedriver、没有常驻进程**。
+
 ## ⚠️ 特别提醒
 
-**校园网下不要挂梯子！！！！！！！！**
-**校园网下不要挂梯子！！！！！！！！**
+**校园网下不要挂梯子！！！！！！！！**  
+**校园网下不要挂梯子！！！！！！！！**  
 **校园网下不要挂梯子！！！！！！！！** 
 会让脚本失效 而且蜀黍可能请你去喝茶 不要作死
 如果你是在**手机热点或家里**用梯子，脚本会自动跳过（0.09 秒退出），不会冲突
@@ -20,7 +21,7 @@
 
 - **开机自动联网**：开机登录 Windows ，WiFi自动连接，脚本立刻认证，实测 6 秒内就能上网；另外还有每 2 分钟一次的兜底巡检
 - **断线秒级恢复**：掉了也不用管，重连后约 1 秒自动重新认证（实测 0.6 秒）
-- **WiFi 掉线自动连回**：Windows 开机只尝试连一次 WiFi，脚本每 2 分钟检查一次，发现网卡确实断开、且能扫到校园 SSID 时主动连一次。                                                       
+- **WiFi 掉线自动连回**：Windows 开机只尝试连一次 WiFi，脚本每 2 分钟检查一次，发现网卡确实断开、且能扫到校园 SSID 时主动连一次。
 - **只在完全没连网络时才动手**：你正在用手机热点或家里 WiFi 时绝不抢占；断开持续 5 秒以上才尝试，60 秒内最多试一次
 - **切网自动修复 DHCP**：从手机热点切回校园网时，Windows 常拿旧租约去续租而被服务器拒绝（DHCPNAK），表现就是"连上 WiFi 却一直没 IP"。脚本检测到"连着校园 SSID 但 IP 不属于校园网段"时会自动释放并重取租约
 - **换网段自适应**：`queryString` 绑定本机 IP，脚本每次从网关跳转页实时抓取，换 AP / 换楼不会失效
@@ -40,11 +41,12 @@
 
 适用于 Windows 10 / 11 的 x64 电脑。`HHUCampusAutoLogin.exe` 用于配置和手动操作，`HHUCampusAutoLogin-background.exe` 用于后台巡检，两个文件都要保留。
 
-修改账号或运营商：再次双击 `install.cmd`，或在该文件夹打开终端运行 `./HHUCampusAutoLogin.exe setup`。查看日志：`logs/auto_login.log`。
+修改账号或运营商：再次双击 `install.cmd`，或在该文件夹打开终端运行 `.\HHUCampusAutoLogin.exe setup`。查看日志：`logs/auto_login.log`。
 
 卸载：双击 `uninstall.cmd`，确认计划任务删除成功后再删除文件夹。移动文件夹或升级版本后，请重新运行 `install.cmd` 更新计划任务中的路径。卸载只删除计划任务，不删除本地账号配置。
 
 **Code → Download ZIP 下载的是源码，不包含 EXE。无需 Python 的用户请下载 Releases 中的 Windows ZIP。**
+
 ## 可选优化：关闭无线网卡省电 追求绝对稳定的看这里
 
 Windows 允许系统"为省电"临时关闭无线网卡，这可能造成偶发的短暂掉线。
@@ -84,7 +86,16 @@ Get-ChildItem $cls -ErrorAction SilentlyContinue | ForEach-Object {
 把 `PnPCapabilities` 改回 `0`，或在设备管理器中重新勾选该选项：
 
 ```powershell
-Set-ItemProperty $_.PSPath -Name PnPCapabilities -Value 0 -Type DWord
+$guid = (Get-NetAdapter -Name "WLAN").InterfaceGuid
+$cls  = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}"
+
+Get-ChildItem $cls -ErrorAction SilentlyContinue | ForEach-Object {
+    $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+    if ($p.NetCfgInstanceId -eq "{$guid}") {
+        Set-ItemProperty $_.PSPath -Name PnPCapabilities -Value 0 -Type DWord
+        Write-Host "已恢复省电: $($p.DriverDesc)"
+    }
+}
 ```
 
 ### 取舍
@@ -106,7 +117,7 @@ Set-ItemProperty $_.PSPath -Name PnPCapabilities -Value 0 -Type DWord
 **Q1：日志报「设备未注册」**
 
 自己用浏览器登录一次校园网就行
-你平常怎么登陆，这里怎么操作
+你平常怎么登录，这里怎么操作
 嫌慢的可以在浏览器地址栏输入 `http://10.96.0.155`，用学号和密码登录，看到「登录成功」页面就完事。
 
 登录完脚本还是没反应，就**重启电脑**。
@@ -131,7 +142,7 @@ Set-ItemProperty $_.PSPath -Name PnPCapabilities -Value 0 -Type DWord
 
 Windows 拿着上一次的 IP 去续，被学校服务器拒绝了。
 
-**等 30 秒** 如果还是没网
+**等 30 秒**。如果还是没网，按顺序试：
 1. 打开浏览器随便访问一个网页——如果跳出学校的登录页，就手动登录一次
 2. 还不行就**重启电脑**
 
@@ -142,7 +153,6 @@ Windows 拿着上一次的 IP 去续，被学校服务器拒绝了。
 Windows 开机只会尝试连一次 WiFi，失败就不管了。脚本每 2 分钟检查一次，会自动帮你连。\
 嫌慢不想等，就手动点右下角网络图标，选 `Hohai University` 连上——连上之后脚本会自动登录，1s左右完成\
 想以后开机连点都不用点：打开 `设置 → 网络和 Internet → WLAN → 管理已知网络` → 点 `Hohai University` → 打开「连接时自动连接」，这条上面也提过了
-
 
 ---
 
@@ -202,7 +212,7 @@ python auto_login.py install    # 安装计划任务（每 2 分钟一次）
 | `--verbose` | 输出调试日志 |
 | `--force` | 忽略"已在线"，强制认证 |
 
-可执行版将命令中的 `python auto_login.py` 换成 `./HHUCampusAutoLogin.exe`，例如 `./HHUCampusAutoLogin.exe check`。后台程序无需手动打开。
+可执行版将命令中的 `python auto_login.py` 换成 `.\HHUCampusAutoLogin.exe`，例如 `.\HHUCampusAutoLogin.exe check`。后台程序无需手动打开。
 
 ## 配置项
 
@@ -213,13 +223,14 @@ python auto_login.py install    # 安装计划任务（每 2 分钟一次）
 | `portal_host` | 门户域名，默认 `eportal.hhu.edu.cn` |
 | `portal_ip` | 门户 IP，默认 `10.96.0.155`（掉线时 DNS 不可用，必须直连 IP） |
 | `campus_ip_prefix` | 校园网段前缀，默认 `10.` |
-| `campus_ssid` | 校园 WiFi 名称，默认 `Hohai University`。只有连在这个 SSID 上才会自动重取 DHCP，避免误伤其他网络 |
+| `campus_ssid` | 校园 WiFi 名称，默认 `Hohai University`。脚本靠它判断“现在是不是在校园网”、WiFi 掉线后要不要连回、以及连错网段时重取 DHCP |
+| `auto_connect_wifi` | WiFi 掉线时是否自动连回校园网，默认 `true`。改成 `false` 后脚本完全不碰 WiFi，只负责连上之后的认证 |
 | `username` | 学号 |
-| `password` / `password_scheme` | DPAPI 密文，或 `plain` 明文（非 Windows） |
+| `password` / `password_scheme` | DPAPI 密文，或 `plain` 明文 |
 | `service` | 运营商服务名，见下 |
 | `interval_minutes` | 巡检间隔，默认 2 分钟 |
 
-常州校区可选的服务名（来自门户 `getServices`）：
+可选的服务名（来自门户 `getServices`，江宁、常州是同一套）：
 
 ```
 校园外网服务(out-campus NET)     # 校园网
@@ -258,7 +269,6 @@ userId=<双层URL编码的学号>&password=<双层URL编码的密码>&service=<�
 2. **必须直连 IP 并伪造 Host 头**。认证前 DNS 通常不通，用域名会直接解析失败。
 3. **`queryString` 绑定 IP**，缓存会失效，必须每次重新抓。
 4. **值要双层 URL 编码**，与页面 `encodeURIComponent(encodeURIComponent(x))` 一致。
-
 
 ## License
 
