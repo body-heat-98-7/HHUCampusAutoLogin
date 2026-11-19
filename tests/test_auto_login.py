@@ -155,5 +155,50 @@ class PortalTests(unittest.TestCase):
         portal.login.assert_called_once_with(query)
 
 
+class WlanDetectionTests(unittest.TestCase):
+    """netsh 输出编码随系统代码页变化，解码错会让"已连接"被误判成"未连接"，
+    进而反复重连、把正常连接打断（v1.0.4 修复的真实事故）。"""
+
+    @staticmethod
+    def _fake_run(payload):
+        return mock.patch.object(app, "_run",
+                                 return_value=mock.Mock(stdout=payload, returncode=0))
+
+    def test_connected_state_from_utf8_chinese_output(self):
+        payload = "系统上有 1 个接口\n\n    状态 : 已连接\n    SSID : Hohai University\n".encode("utf-8")
+        with self._fake_run(payload):
+            self.assertTrue(app.wlan_connected())
+
+    def test_connected_state_from_gbk_chinese_output(self):
+        payload = "系统上有 1 个接口\n\n    状态 : 已连接\n    SSID : Hohai University\n".encode("gbk")
+        with self._fake_run(payload):
+            self.assertTrue(app.wlan_connected())
+
+    def test_connected_state_from_english_output(self):
+        payload = "    State                  : connected\n    SSID : Hohai University\n".encode("ascii")
+        with self._fake_run(payload):
+            self.assertTrue(app.wlan_connected())
+
+    def test_disconnected_state_is_detected(self):
+        with self._fake_run("    State                  : disconnected\n".encode("ascii")):
+            self.assertFalse(app.wlan_connected())
+
+    def test_unknown_output_does_not_force_reconnect(self):
+        # 拿不到状态时必须保守当作"已连接"，否则会误断用户的网络
+        with self._fake_run(b""):
+            self.assertTrue(app.wlan_connected())
+
+    def test_ssid_is_read_from_gbk_output(self):
+        with self._fake_run("    SSID                   : Hohai University\n".encode("gbk")):
+            self.assertEqual(app.current_ssid(), "Hohai University")
+
+    def test_ensure_wifi_does_not_touch_an_existing_connection(self):
+        with mock.patch.object(app, "wlan_connected", return_value=True), \
+                mock.patch.object(app, "current_ssid", return_value="Hohai University"), \
+                mock.patch.object(app, "_run") as run:
+            self.assertFalse(app.ensure_wifi(valid_config()))
+        run.assert_not_called()
+
+
 if __name__ == "__main__":
     unittest.main()
