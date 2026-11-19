@@ -42,6 +42,17 @@ from logging.handlers import RotatingFileHandler
 APP_NAME = "HHUCampusAutoLogin"
 DEFAULT_TASK_NAME = APP_NAME
 IS_WINDOWS = platform.system().lower() == "windows"
+CREATE_NO_WINDOW = 0x08000000 if IS_WINDOWS else 0
+
+
+def _run(cmd, **kwargs):
+    """统一的后台进程调用。
+    pythonw 运行时没有控制台，若子进程（netsh/ipconfig）自己新建控制台，
+    就会每两分钟闪一下黑框；这里强行加 CREATE_NO_WINDOW 抑制。"""
+    kwargs.setdefault("capture_output", True)
+    if IS_WINDOWS:
+        kwargs.setdefault("creationflags", CREATE_NO_WINDOW)
+    return subprocess.run(cmd, **kwargs)
 
 BASE_DIR = os.path.dirname(os.path.abspath(
     sys.executable if getattr(sys, "frozen", False) else __file__))
@@ -108,42 +119,50 @@ def save_json(path, data):
     os.replace(tmp, path)
 
 
+def netsh_text(args, timeout=10):
+    """执行 netsh 并正确解码。
+    注意：netsh 在管道里的输出编码随系统代码页变化（中文系统可能是 UTF-8，
+    也可能是 GBK），按固定编码解码会把"状态: 已连接"变成乱码。"""
+    try:
+        out = _run(["netsh"] + args, timeout=timeout).stdout
+    except Exception:
+        return ""
+    for enc in ("utf-8", "gbk", "utf-16"):
+        try:
+            return out.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return out.decode("utf-8", "replace")
+
+
 def current_ssid():
     """当前连着的 WiFi 名字；未连接或非 Windows 返回空串。"""
     if not IS_WINDOWS:
         return ""
-    try:
-        out = subprocess.run(["netsh", "wlan", "show", "interfaces"],
-                             capture_output=True, timeout=10).stdout
-        m = re.search(r"^\s*SSID\s*:\s*(.+)$", out.decode("gbk", "replace"), re.M)
-        return m.group(1).strip() if m else ""
-    except Exception:
-        return ""
+    txt = netsh_text(["wlan", "show", "interfaces"])
+    m = re.search(r"^\s*SSID\s*:\s*(.+)$", txt, re.M)
+    return m.group(1).strip() if m else ""
 
 
 def wlan_connected():
     """无线网卡当前是否处于已连接状态。"""
     if not IS_WINDOWS:
         return True
-    try:
-        out = subprocess.run(["netsh", "wlan", "show", "interfaces"],
-                             capture_output=True, timeout=10).stdout
-        txt = out.decode("gbk", "replace")
-    except Exception:
+    txt = netsh_text(["wlan", "show", "interfaces"])
+    if not txt:
+        return True          # 拿不到状态时保守当作已连接，避免误操作断网
+    m = re.search(r"(?:State|状态)\s*:\s*(\S+)", txt, re.I)
+    if not m:
         return True
-    return bool(re.search(r"(State|状态)\s*:\s*(connected|已连接)", txt, re.I))
+    state = m.group(1).strip().lower()
+    return state == "connected" or "已连接" in state
 
 
 def campus_ssid_visible(ssid):
     """校园 SSID 是否在扫描列表里（能扫到才去连，避免瞎等）。"""
     if not IS_WINDOWS or not ssid:
         return False
-    try:
-        out = subprocess.run(["netsh", "wlan", "show", "networks"],
-                             capture_output=True, timeout=20).stdout
-        return ssid in out.decode("gbk", "replace")
-    except Exception:
-        return False
+    return ssid in netsh_text(["wlan", "show", "networks"], timeout=20)
 
 
 def ensure_wifi(cfg):
@@ -159,7 +178,7 @@ def ensure_wifi(cfg):
         return False
     log.info("WiFi 未连接，尝试自动连接 %s", wanted)
     try:
-        subprocess.run(["netsh", "wlan", "connect", "name=%s" % wanted, "ssid=%s" % wanted],
+        _run(["netsh", "wlan", "connect", "name=%s" % wanted, "ssid=%s" % wanted],
                        capture_output=True, timeout=25)
     except Exception as e:
         log.debug("netsh wlan connect 失败: %s", e)
@@ -304,8 +323,8 @@ class Portal:
             return False
         log.info("已连上 %s，但 IP 是 %s，尝试重新获取 DHCP 租约", ssid, ip or "无")
         try:
-            subprocess.run(["ipconfig", "/release"], capture_output=True, timeout=20)
-            subprocess.run(["ipconfig", "/renew"], capture_output=True, timeout=45)
+            _run(["ipconfig", "/release"], capture_output=True, timeout=20)
+            _run(["ipconfig", "/renew"], capture_output=True, timeout=45)
         except Exception as e:
             log.debug("ipconfig 执行失败: %s", e)
             return False
@@ -426,8 +445,10 @@ def cmd_check(cfg, force=False):
 
 
 def cmd_login(cfg, force=False):
-    ensure_wifi(cfg)
     p = Portal(cfg)
+    # 只有"本机还没拿到校园网 IP"时才考虑重连 WiFi，避免把正常的连接打断
+    if not p.local_ip().startswith(cfg.get("campus_ip_prefix", "10.")):
+        ensure_wifi(cfg)
     if not p.on_campus():
         log.debug("当前不在校园网内，跳过")
         return 0
@@ -524,7 +545,7 @@ def cmd_install(cfg, task_name=DEFAULT_TASK_NAME):
     event_task = task_name + "-OnConnect"
 
     # 1) 定时兜底
-    r = subprocess.run(["schtasks", "/Create", "/TN", task_name, "/TR", tr,
+    r = _run(["schtasks", "/Create", "/TN", task_name, "/TR", tr,
                         "/SC", "MINUTE", "/MO", str(minutes), "/F"],
                        capture_output=True)
     print((r.stdout + r.stderr).decode("gbk", "replace").strip())
@@ -532,7 +553,7 @@ def cmd_install(cfg, task_name=DEFAULT_TASK_NAME):
         return 1
 
     # 2) 网络一连上就立刻跑一次，避免"断几秒要等下一轮巡检"
-    r2 = subprocess.run(["schtasks", "/Create", "/TN", event_task, "/TR", tr,
+    r2 = _run(["schtasks", "/Create", "/TN", event_task, "/TR", tr,
                          "/SC", "ONEVENT",
                          "/EC", "Microsoft-Windows-NetworkProfile/Operational",
                          "/MO", "*[System[EventID=10000]]", "/F"],
@@ -556,7 +577,7 @@ def cmd_install(cfg, task_name=DEFAULT_TASK_NAME):
 def cmd_uninstall(task_name=DEFAULT_TASK_NAME):
     ok = True
     for name in (task_name, task_name + "-OnConnect"):
-        r = subprocess.run(["schtasks", "/Delete", "/TN", name, "/F"], capture_output=True)
+        r = _run(["schtasks", "/Delete", "/TN", name, "/F"], capture_output=True)
         out = (r.stdout + r.stderr).decode("gbk", "replace").strip()
         print(out)
         if r.returncode != 0 and "找不到" not in out and "cannot find" not in out.lower():
