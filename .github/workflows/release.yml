@@ -48,6 +48,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0          # 需要完整历史来算"上一版到本版"的提交列表
       - uses: actions/download-artifact@v8
         with:
           name: HHUCampusAutoLogin-windows-x64
@@ -58,6 +61,27 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          gh release create "$RELEASE_TAG" release/* --verify-tag --title "$RELEASE_TAG" \
-            --generate-notes \
-            --notes '**Windows 64 位免 Python 版**：下载 `windows-x64.zip`，完整解压到固定文件夹后双击 `install.cmd`。请保留两个 EXE（主程序用于配置，background 用于计划任务）。使用前请先看 README 顶部的「⚠️ 特别提醒」，尤其是用代理 / 加速器的同学。以下为本版本相对上一版的代码变更：'
+          PREV=$(git describe --tags --abbrev=0 "${RELEASE_TAG}^" 2>/dev/null || true)
+          if [ -n "$PREV" ]; then
+            LOG=$(git log --no-merges --pretty=format:'- %s' "$PREV..$RELEASE_TAG")
+            RANGE="$PREV...$RELEASE_TAG"
+          else
+            LOG=$(git log --no-merges --pretty=format:'- %s' "$RELEASE_TAG" | head -20)
+            RANGE="$RELEASE_TAG"
+          fi
+
+          {
+            echo '**Windows 64 位免 Python 版**：下载 `windows-x64.zip`，完整解压到固定文件夹后双击 `install.cmd`。请保留两个 EXE（主程序用于配置，background 用于计划任务）。'
+            echo
+            echo '使用前请先看 README 顶部的「⚠️ 特别提醒」，尤其是用代理 / 加速器的同学。'
+            echo
+            echo '### 本版本变更'
+            echo
+            echo "$LOG"
+            echo
+            echo '### 完整对比'
+            echo "https://github.com/${GH_REPO}/compare/${RANGE}"
+          } > NOTES.md
+
+          cat NOTES.md
+          gh release create "$RELEASE_TAG" release/* --verify-tag --title "$RELEASE_TAG" --notes-file NOTES.md
