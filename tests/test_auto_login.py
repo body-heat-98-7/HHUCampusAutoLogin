@@ -200,5 +200,36 @@ class WlanDetectionTests(unittest.TestCase):
         run.assert_not_called()
 
 
+class CampusDetectionTests(unittest.TestCase):
+    """开了 Clash TUN 之后，「路由到门户时的源地址」会变成 198.18.0.1，
+    不能再拿它判断是否在校园网，否则自动登录会静默失效。"""
+
+    def _cfg(self):
+        cfg = valid_config()
+        cfg["campus_ssid"] = "Hohai University"
+        return cfg
+
+    def test_on_campus_true_when_ssid_matches(self):
+        portal = app.Portal(self._cfg())
+        with mock.patch.object(app, "current_ssid", return_value="Hohai University"):
+            self.assertTrue(portal.on_campus())
+
+    def test_on_campus_false_on_other_network(self):
+        portal = app.Portal(self._cfg())
+        with mock.patch.object(app, "current_ssid", return_value="体温电台"), \
+                mock.patch.object(app, "wlan_ip", return_value="172.20.10.2"):
+            self.assertFalse(portal.on_campus())
+
+    def test_on_campus_uses_adapter_ip_not_tun_ip(self):
+        """TUN 开启时 local_ip() 是 198.18.0.1，但 wlan_ip() 应是真实网卡地址。"""
+        portal = app.Portal(self._cfg())
+        with mock.patch.object(app, "current_ssid", return_value="体温电台"), \
+                mock.patch.object(app, "wlan_ip", return_value="10.113.69.145"), \
+                mock.patch.object(portal, "local_ip", return_value="198.18.0.1"), \
+                mock.patch.object(app.socket, "create_connection") as conn:
+            self.assertTrue(portal.on_campus())
+        conn.assert_called()
+
+
 if __name__ == "__main__":
     unittest.main()

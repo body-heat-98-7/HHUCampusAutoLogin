@@ -165,6 +165,31 @@ def campus_ssid_visible(ssid):
     return ssid in netsh_text(["wlan", "show", "networks"], timeout=20)
 
 
+def wlan_ip(alias="WLAN"):
+    """取无线网卡**自身**的 IPv4 地址。
+
+    不能用「路由到门户时的源地址」：开了 Clash TUN 之类的虚拟网卡后，
+    到 10.96.0.155 的路由会走 TUN，源地址变成 198.18.0.1，
+    校园网判定就会失效。这里直接问网卡本人。"""
+    if not IS_WINDOWS:
+        return ""
+    try:
+        r = _run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                  "(Get-NetIPAddress -InterfaceAlias '%s' -AddressFamily IPv4 "
+                  "-ErrorAction SilentlyContinue | Select-Object -First 1).IPAddress" % alias],
+                 timeout=15)
+        ip = r.stdout.decode("utf-8", "replace").strip().splitlines()
+        ip = ip[-1].strip() if ip else ""
+        if re.match(r"^\d{1,3}(\.\d{1,3}){3}$", ip):
+            return ip
+    except Exception as e:
+        log.debug("wlan_ip 查询失败: %s", e)
+    # 兜底：从 netsh 输出里抓第一个 IPv4
+    txt = netsh_text(["interface", "ipv4", "show", "addresses", alias])
+    m = re.search(r"(\d{1,3}(?:\.\d{1,3}){3})", txt)
+    return m.group(1) if m else ""
+
+
 def ensure_wifi(cfg):
     """开机后 Windows 有时不会自动重连（连上一次失败后就不重试）。
     仅在"当前完全没连上 WiFi"且能扫到校园 SSID 时，主动连一次。
@@ -298,13 +323,21 @@ class Portal:
             s.close()
 
     def on_campus(self):
-        ip = self.local_ip()
-        if not ip.startswith(self.cfg.get("campus_ip_prefix", "10.")):
+        prefix = self.cfg.get("campus_ip_prefix", "10.")
+        # 首先看 SSID：这是唯一不受 TUN / 虚拟网卡干扰的判据
+        wanted = (self.cfg.get("campus_ssid") or "").strip()
+        ssid = current_ssid()
+        if wanted and ssid == wanted:
+            log.debug("已连接校园 SSID: %s", ssid)
+            return True
+
+        ip = wlan_ip()
+        if not ip.startswith(prefix):
             # 从手机热点切回校园网时，Windows 会拿旧租约去续，常被 DHCP 服务器拒绝
             # （DHCPNAK），表现就是"连上 WiFi 了但一直没有 IP"。这里主动重取一次。
             if self._renew_dhcp(ip):
-                ip = self.local_ip()
-            if not ip.startswith(self.cfg.get("campus_ip_prefix", "10.")):
+                ip = wlan_ip()
+            if not ip.startswith(prefix):
                 log.debug("本机地址 %s 不在校园网段，跳过", ip or "未知")
                 return False
         for target in (self.ip, self.host):
@@ -331,7 +364,7 @@ class Portal:
         prefix = self.cfg.get("campus_ip_prefix", "10.")
         deadline = time.time() + 25
         while time.time() < deadline:
-            if self.local_ip().startswith(prefix):
+            if wlan_ip().startswith(prefix):
                 log.info("已重新拿到校园网 IP")
                 return True
             time.sleep(2)
@@ -447,7 +480,7 @@ def cmd_check(cfg, force=False):
 def cmd_login(cfg, force=False):
     p = Portal(cfg)
     # 只有"本机还没拿到校园网 IP"时才考虑重连 WiFi，避免把正常的连接打断
-    if not p.local_ip().startswith(cfg.get("campus_ip_prefix", "10.")):
+    if not wlan_ip().startswith(cfg.get("campus_ip_prefix", "10.")):
         ensure_wifi(cfg)
     if not p.on_campus():
         log.debug("当前不在校园网内，跳过")
