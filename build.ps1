@@ -1,6 +1,6 @@
-﻿param(
+param(
     [ValidatePattern('^v?\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$')]
-    [string]$Version = 'v1.0.2',
+    [string]$Version = 'v1.0.3',
     [string]$Python = 'python'
 )
 
