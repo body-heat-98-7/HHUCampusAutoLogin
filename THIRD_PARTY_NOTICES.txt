@@ -1,0 +1,23 @@
+HHUCampusAutoLogin Windows executable notices
+============================================
+
+The project source code is licensed under the MIT License in LICENSE.
+The Windows release also includes an unmodified CPython interpreter and
+the PyInstaller bootloader so that Python need not be installed separately.
+
+CPython
+-------
+Copyright Python Software Foundation and other contributors.
+Full supplied license and copyright notices: licenses/Python.txt
+Source and license information: https://www.python.org/
+
+PyInstaller 6.22.3 bootloader
+---------------------------
+Copyright PyInstaller contributors.
+Full license, including the bootloader exception: licenses/PyInstaller.txt
+Source and license information: https://github.com/pyinstaller/pyinstaller
+
+PyInstaller's exception permits distributing generated executables under
+the application's own license, subject to the terms in that license file.
+The PyInstaller build tools are used during packaging and are not required
+on the end user's computer.

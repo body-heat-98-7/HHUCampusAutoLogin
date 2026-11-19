@@ -1,0 +1,25 @@
+# 本地配置与运行时产物，不要提交
+config.json
+config.json.tmp
+cache.json
+cache.json.tmp
+logs/
+__pycache__/
+*.pyc
+*.log
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# 本地打包环境与可执行版，分发文件放在 GitHub Releases
+.venv/
+venv/
+build/
+dist/
+work/
+*.spec
+*.exe
+*.zip

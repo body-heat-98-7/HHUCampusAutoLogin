@@ -1,0 +1,2 @@
+# Only needed by maintainers to build the Windows release.
+PyInstaller==6.22.3
