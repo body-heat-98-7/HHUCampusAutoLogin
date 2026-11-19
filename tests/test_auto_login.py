@@ -23,6 +23,32 @@ def valid_config():
                 password="test-password")
 
 
+class OutputTests(unittest.TestCase):
+    def test_help_is_utf8_on_english_windows_output_streams(self):
+        output_bytes = io.BytesIO()
+        error_bytes = io.BytesIO()
+        output = io.TextIOWrapper(output_bytes, encoding="cp1252")
+        errors = io.TextIOWrapper(error_bytes, encoding="cp1252")
+        with mock.patch.object(sys, "stdout", output), \
+                mock.patch.object(sys, "stderr", errors), \
+                mock.patch.object(sys, "argv", ["HHUCampusAutoLogin.exe", "--help"]), \
+                mock.patch.object(app, "Portal", side_effect=AssertionError("network access")):
+            with self.assertRaises(SystemExit) as result:
+                app.run()
+        output.flush()
+        self.assertEqual(result.exception.code, 0)
+        self.assertIn("河海大学校园网自动认证", output_bytes.getvalue().decode("utf-8"))
+        self.assertEqual(errors.encoding, "utf-8")
+
+    def test_hidden_worker_tolerates_missing_output_streams(self):
+        with mock.patch.object(sys, "stdout", None), \
+                mock.patch.object(sys, "stderr", None), \
+                mock.patch.object(sys, "argv", ["HHUCampusAutoLogin-background.exe", "--help"]):
+            with self.assertRaises(SystemExit) as result:
+                app.run()
+        self.assertEqual(result.exception.code, 0)
+
+
 class ConfigTests(unittest.TestCase):
     def test_frozen_config_lives_next_to_executable(self):
         with tempfile.TemporaryDirectory(prefix="campus test ") as directory:

@@ -547,6 +547,15 @@ def main():
 def run():
     """兜底：任何异常都落盘，绝不静默失败。"""
     try:
+        # 英文 Windows 的重定向输出可能默认 cp1252，帮助和日志都包含中文。
+        # 无控制台的后台程序中，这两个流可能是 None。
+        for stream in (sys.stdout, sys.stderr):
+            reconfigure = getattr(stream, "reconfigure", None)
+            if callable(reconfigure):
+                try:
+                    reconfigure(encoding="utf-8", errors="backslashreplace")
+                except (OSError, ValueError):
+                    pass
         return main()
     except KeyboardInterrupt:
         return 130
