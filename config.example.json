@@ -3,6 +3,7 @@
   "portal_ip": "10.96.0.155",
   "campus_ip_prefix": "10.",
   "campus_ssid": "Hohai University",
+  "auto_connect_wifi": true,
   "username": "",
   "password_scheme": "dpapi",
   "password": "",

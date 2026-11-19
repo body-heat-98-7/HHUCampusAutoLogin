@@ -83,6 +83,7 @@ DEFAULT_CONFIG = {
     "password": "",
     "service": "校园外网服务(out-campus NET)",
     "campus_ssid": "Hohai University",
+    "auto_connect_wifi": True,    # WiFi 掉线后是否尝试连回校园网
     "interval_minutes": 2,
 }
 
@@ -159,10 +160,75 @@ def wlan_connected():
 
 
 def campus_ssid_visible(ssid):
-    """校园 SSID 是否在扫描列表里（能扫到才去连，避免瞎等）。"""
+    """校园 SSID 是否在扫描列表里（扫不到就不用等了）。"""
     if not IS_WINDOWS or not ssid:
         return False
     return ssid in netsh_text(["wlan", "show", "networks"], timeout=20)
+
+
+def ensure_wifi(cfg):
+    """WiFi 掉线后尝试连回校园网。
+
+    三条安全约束，每条都对应一次真实的踩坑：
+
+    1. **只要网卡已连接就绝不插手**。曾经写成"已连接且 SSID 非空"，而 WiFi 重连
+       的那一瞬间 SSID 还读不出来，于是被误判成"完全没连网络"，脚本强行切到校园网，
+       把用户正在用的手机热点踢掉了——而且每次切换又触发"网络已连接"事件，形成死循环。
+    2. **断开要持续 5 秒才动手**，给 Windows 自己的自动重连留时间，避免抢跑。
+    3. **60 秒内最多试一次，失败后冷却 10 分钟**，防止反复切网。
+
+    config.json 里把 `auto_connect_wifi` 设为 false 可以完全关掉这个行为。
+    """
+    wanted = (cfg.get("campus_ssid") or "").strip()
+    if not wanted or not IS_WINDOWS:
+        return False
+    if not cfg.get("auto_connect_wifi", True):
+        return False
+
+    # 约束 1：已经连着任何网络（校园网、热点、家里 WiFi）都不干预
+    if wlan_connected():
+        return False
+
+    # 约束 2：断开持续 5 秒以上才认为是"真的掉了"
+    time.sleep(5)
+    if wlan_connected():
+        return False
+
+    # 约束 3：限流，避免反复切网
+    cache = load_json(CACHE_FILE)
+    now = time.time()
+    last_try = float(cache.get("wifi_connect_attempt") or 0)
+    if now - last_try < 60:
+        log.debug("距上次尝试不足 60 秒，跳过")
+        return False
+
+    if not campus_ssid_visible(wanted):
+        log.debug("扫不到 %s，跳过", wanted)
+        return False
+
+    log.info("WiFi 未连接，尝试连接 %s", wanted)
+    cache["wifi_connect_attempt"] = now
+    save_json(CACHE_FILE, cache)
+
+    try:
+        _run(["netsh", "wlan", "connect", "name=%s" % wanted, "ssid=%s" % wanted],
+             timeout=25)
+    except Exception as e:
+        log.debug("netsh wlan connect 失败: %s", e)
+        return False
+
+    for _ in range(15):
+        time.sleep(1)
+        if wlan_connected():
+            log.info("WiFi 已连接")
+            return True
+
+    log.warning("自动连接 %s 超时，10 分钟内不再重试", wanted)
+    cache["wifi_connect_attempt"] = now + 540      # 冷却 10 分钟
+    save_json(CACHE_FILE, cache)
+    return False
+
+
 
 
 def wlan_ip(alias="WLAN"):
@@ -190,31 +256,6 @@ def wlan_ip(alias="WLAN"):
     return m.group(1) if m else ""
 
 
-def ensure_wifi(cfg):
-    """开机后 Windows 有时不会自动重连（连上一次失败后就不重试）。
-    仅在"当前完全没连上 WiFi"且能扫到校园 SSID 时，主动连一次。
-    绝不抢占其他已连接的网络（比如手机热点）。"""
-    wanted = (cfg.get("campus_ssid") or "").strip()
-    if not wanted or not IS_WINDOWS:
-        return False
-    if wlan_connected() and current_ssid():
-        return False
-    if not campus_ssid_visible(wanted):
-        return False
-    log.info("WiFi 未连接，尝试自动连接 %s", wanted)
-    try:
-        _run(["netsh", "wlan", "connect", "name=%s" % wanted, "ssid=%s" % wanted],
-                       capture_output=True, timeout=25)
-    except Exception as e:
-        log.debug("netsh wlan connect 失败: %s", e)
-        return False
-    for _ in range(12):
-        time.sleep(1)
-        if wlan_connected():
-            log.info("WiFi 已连接")
-            return True
-    log.warning("自动连接 %s 超时", wanted)
-    return False
 
 
 def validate_config(cfg, require_credentials=True):
@@ -479,8 +520,8 @@ def cmd_check(cfg, force=False):
 
 def cmd_login(cfg, force=False):
     p = Portal(cfg)
-    # 只有"本机还没拿到校园网 IP"时才考虑重连 WiFi，避免把正常的连接打断
-    if not wlan_ip().startswith(cfg.get("campus_ip_prefix", "10.")):
+    # 只在网卡确实没连上时才尝试连回校园网；连着任何网络都不插手
+    if not wlan_connected():
         ensure_wifi(cfg)
     if not p.on_campus():
         log.debug("当前不在校园网内，跳过")

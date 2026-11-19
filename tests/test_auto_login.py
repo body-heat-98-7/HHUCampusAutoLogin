@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -231,5 +232,63 @@ class CampusDetectionTests(unittest.TestCase):
         conn.assert_called()
 
 
+
+class WifiAutoConnectTests(unittest.TestCase):
+    """WiFi 断开后连回校园网的三条安全约束。
+
+    背景：v1.0.7/v1.0.8 曾有严重 bug —— WiFi 重连瞬间读不到 SSID，
+    脚本误判成"完全没连网络"，强行切到校园网，抢走用户正在用的手机热点，
+    而且每次切换又触发"网络已连接"事件，形成反复重连的死循环。
+    """
+
+    def _cfg(self, **kw):
+        cfg = valid_config()
+        cfg["campus_ssid"] = "Hohai University"
+        cfg.update(kw)
+        return cfg
+
+    def test_does_nothing_when_already_connected(self):
+        """已连着任何网络（热点/校园网）时绝不插手。"""
+        with mock.patch.object(app, "wlan_connected", return_value=True), \
+                mock.patch.object(app, "_run") as run:
+            self.assertFalse(app.ensure_wifi(self._cfg()))
+        run.assert_not_called()
+
+    def test_waits_and_skips_when_connection_recovers(self):
+        """断开不满 5 秒就自己连回来了，不抢。"""
+        with mock.patch.object(app, "wlan_connected", side_effect=[False, True]), \
+                mock.patch.object(app.time, "sleep"), \
+                mock.patch.object(app, "_run") as run:
+            self.assertFalse(app.ensure_wifi(self._cfg()))
+        run.assert_not_called()
+
+    def test_rate_limited(self):
+        """60 秒内只尝试一次，避免反复切网。"""
+        with mock.patch.object(app, "wlan_connected", return_value=False), \
+                mock.patch.object(app.time, "sleep"), \
+                mock.patch.object(app, "campus_ssid_visible", return_value=True), \
+                mock.patch.object(app, "load_json",
+                                  return_value={"wifi_connect_attempt": time.time()}), \
+                mock.patch.object(app, "save_json"), \
+                mock.patch.object(app, "_run") as run:
+            self.assertFalse(app.ensure_wifi(self._cfg()))
+        run.assert_not_called()
+
+    def test_can_be_disabled_via_config(self):
+        with mock.patch.object(app, "wlan_connected", return_value=False), \
+                mock.patch.object(app, "_run") as run:
+            self.assertFalse(app.ensure_wifi(self._cfg(auto_connect_wifi=False)))
+        run.assert_not_called()
+
+    def test_connects_when_truly_disconnected(self):
+        """真的断开且持续 5 秒、不在冷却期、能扫到校园网 → 才去连。"""
+        with mock.patch.object(app, "wlan_connected", side_effect=[False, False, True]), \
+                mock.patch.object(app.time, "sleep"), \
+                mock.patch.object(app, "campus_ssid_visible", return_value=True), \
+                mock.patch.object(app, "load_json", return_value={}), \
+                mock.patch.object(app, "save_json"), \
+                mock.patch.object(app, "_run") as run:
+            self.assertTrue(app.ensure_wifi(self._cfg()))
+        run.assert_called_once()
 if __name__ == "__main__":
     unittest.main()
