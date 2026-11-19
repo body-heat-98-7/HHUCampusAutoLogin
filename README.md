@@ -1,11 +1,11 @@
 # HHUCampusAutoLogin
 水之子们好！
-河海sb校园网困扰我们已久，想要找自动连接脚本却发现都是前辈们的旧代码，使用起来效果不理想。为了让我们用起来不烧心，本人调教了dsh和gpt3天，并结合了前辈们开源的部分代码，搓出来这一款自动连接脚本
-该脚本考虑了多种连接可能性，包括开机自启，热点切校园网，windows网络自动断连等，绝大部分情况均可自动连接。也做了傻瓜式安装（你也可以把网址丢给dsh让它帮你装）
-目前江宁校区使用体验良好，金坛网络可能还要做特别优化，不过应该也能凑合用
-大部分常见事项都在下面，包括对连接稳定的进一步优化（比如更改网卡设置等）
-特别提醒！！！：hhu校园网是可以直连GitHub的，但不要作死在校园网下翻墙。1是因为👮‍叔叔2是代理软件的tun模式可能会导致代理冲突，进而导致脚本失效
-纯 Python 标准库实现：**不需要浏览器、不需要 chromedriver、没有常驻进程**。提供 Windows 免安装 Python 的可执行版。
+-河海sb校园网困扰我们已久，想要找自动连接脚本却发现都是前辈们的旧代码，使用起来效果不理想。为了让我们用起来不烧心，本人调教了dsh和gpt3天，并结合了前辈们开源的部分代码，搓出来这一款自动连接脚本
+-该脚本考虑了多种连接可能性，包括开机自启，热点切校园网，windows网络自动断连等，绝大部分情况均可自动连接。也做了傻瓜式安装（你也可以把网址丢给dsh让它帮你装）
+-目前江宁校区使用体验良好，金坛网络可能还要做特别优化，不过应该也能凑合用
+-大部分常见事项都在下面，包括对连接稳定的进一步优化（比如更改网卡设置等）
+-特别提醒！！！：hhu校园网是可以直连GitHub的，但不要作死在校园网下翻墙。1是因为👮‍叔叔2是代理软件的tun模式可能会导致代理冲突，进而导致脚本失效
+-纯 Python 标准库实现：**不需要浏览器、不需要 chromedriver、没有常驻进程**。提供 Windows 免安装 Python 的可执行版。
 
 ## 特性（脚本作用大致描述）
 
@@ -34,6 +34,55 @@
 卸载：双击 `uninstall.cmd`，确认计划任务删除成功后再删除文件夹。移动文件夹或升级版本后，请重新运行 `install.cmd` 更新计划任务中的路径。卸载只删除计划任务，不删除本地账号配置。
 
 **Code → Download ZIP 下载的是源码，不包含 EXE。无需 Python 的用户请下载 Releases 中的 Windows ZIP。**
+## 可选优化：关闭无线网卡省电
+
+Windows 允许系统"为省电"临时关闭无线网卡，这可能造成偶发的短暂掉线。
+在事件日志里表现为 `Microsoft-Windows-WLAN-AutoConfig` 的 **8003** 事件，
+原因为 **"网络被驱动程序断开连接"**。
+
+本程序**不会自动修改**系统电源设置（需要管理员权限，且属于系统策略变更，
+应由使用者自行决定）。如需优化，手动设置一次即可，永久生效。
+
+### 图形界面（推荐）
+
+1. `Win + X` → **设备管理器**
+2. 展开 **网络适配器**，找到无线网卡（例如 `Realtek 8922AE-VP WiFi 7 PCI-E NIC`）
+3. 右键 → **属性** → **电源管理** 标签
+4. 取消勾选 **"允许计算机关闭此设备以节约电源"** → 确定
+5. 断开并重新连接一次 WiFi 使其生效
+
+### 命令行（需管理员 PowerShell）
+
+```powershell
+$guid = (Get-NetAdapter -Name "WLAN").InterfaceGuid
+$cls  = "HKLM:\SYSTEM\CurrentControlSet\Control\Class\{4d36e972-e325-11ce-bfc1-08002be10318}"
+
+Get-ChildItem $cls -ErrorAction SilentlyContinue | ForEach-Object {
+    $p = Get-ItemProperty $_.PSPath -ErrorAction SilentlyContinue
+    if ($p.NetCfgInstanceId -eq "{$guid}") {
+        Set-ItemProperty $_.PSPath -Name PnPCapabilities -Value 0x10 -Type DWord
+        Write-Host "已关闭省电: $($p.DriverDesc)"
+    }
+}
+```
+
+`PnPCapabilities` 的 `0x10` 位表示"禁止系统为省电关闭该设备"。
+
+### 如何还原
+
+把 `PnPCapabilities` 改回 `0`，或在设备管理器中重新勾选该选项：
+
+```powershell
+Set-ItemProperty $_.PSPath -Name PnPCapabilities -Value 0 -Type DWord
+```
+
+### 取舍
+
+关闭省电后，网卡在空闲时不会断电，**电池续航可能略有下降**
+（通常为毫瓦级，日常使用难以察觉）。
+
+如果你的机器很少出现掉线，**完全可以不做这一步**——程序内置的
+「网络已连接」事件触发与自动重连，已能在掉线后约 1 秒重新完成认证。
 
 ### 使用源码（小白别看）
 
