@@ -1,4 +1,4 @@
-﻿# HHUCampusAutoLogin
+# HHUCampusAutoLogin
 
 河海大学校园网自动认证工具。适用于锐捷 RG-SAM+ ePortal（`eportal.hhu.edu.cn`）。
 
@@ -6,6 +6,7 @@
 
 ## 特性
 
+- **WiFi 掉线自动连回**：开机后 Windows 有时不再自动重连；脚本发现"完全没连上 WiFi"且能扫到校园 SSID 时会主动连接一次（有别的网络在用时不会抢占）
 - **断线秒级恢复**：除了每 2 分钟兜底巡检，还注册了「网络已连接」事件触发，Wi-Fi 重连后**约 1 秒**就会重新认证（实测 0.6 秒）
 - **切网自动修复 DHCP**：从手机热点切回校园网时，Windows 常拿旧租约去续租而被服务器拒绝（DHCPNAK），表现就是"连上 WiFi 却一直没 IP"。脚本检测到"连着校园 SSID 但 IP 不属于校园网段"时会自动释放并重取租约
 - **换网段自适应**：`queryString` 绑定本机 IP，脚本每次从网关跳转页实时抓取，换 AP / 换楼不会失效
@@ -145,6 +146,12 @@ Get-WinEvent -LogName "Microsoft-Windows-Dhcp-Client/Admin" -MaxEvents 10 |
 脚本已内置处理：当它发现"连着校园 SSID（`campus_ssid`）但 IP 不在 `campus_ip_prefix` 网段"，
 会自动执行 `ipconfig /release` + `/renew` 重取租约，随后完成认证。
 另外，任务里注册了「网络已连接」事件触发器，Wi-Fi 重连后约 1 秒就会重新认证。
+
+**Q：开机后 WiFi 干脆没连上，也不会自己连回来**
+Windows 的"自动连接"基本只在开机时试一次，失败后不会持续重试。脚本已内置处理：
+检测到无线网卡处于未连接状态、且能扫描到 `campus_ssid` 时，会执行
+`netsh wlan connect name=<SSID>` 主动连一次（当前若连着别的网络则不抢占）。
+若仍反复出现，多半是无线网卡驱动在启动阶段不稳，建议更新驱动。
 
 **Q：用着用着会断几秒再自动连上**
 先分清是"Wi-Fi 链路断了"还是"认证掉了"：

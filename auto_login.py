@@ -121,6 +121,58 @@ def current_ssid():
         return ""
 
 
+def wlan_connected():
+    """无线网卡当前是否处于已连接状态。"""
+    if not IS_WINDOWS:
+        return True
+    try:
+        out = subprocess.run(["netsh", "wlan", "show", "interfaces"],
+                             capture_output=True, timeout=10).stdout
+        txt = out.decode("gbk", "replace")
+    except Exception:
+        return True
+    return bool(re.search(r"(State|状态)\s*:\s*(connected|已连接)", txt, re.I))
+
+
+def campus_ssid_visible(ssid):
+    """校园 SSID 是否在扫描列表里（能扫到才去连，避免瞎等）。"""
+    if not IS_WINDOWS or not ssid:
+        return False
+    try:
+        out = subprocess.run(["netsh", "wlan", "show", "networks"],
+                             capture_output=True, timeout=20).stdout
+        return ssid in out.decode("gbk", "replace")
+    except Exception:
+        return False
+
+
+def ensure_wifi(cfg):
+    """开机后 Windows 有时不会自动重连（连上一次失败后就不重试）。
+    仅在"当前完全没连上 WiFi"且能扫到校园 SSID 时，主动连一次。
+    绝不抢占其他已连接的网络（比如手机热点）。"""
+    wanted = (cfg.get("campus_ssid") or "").strip()
+    if not wanted or not IS_WINDOWS:
+        return False
+    if wlan_connected() and current_ssid():
+        return False
+    if not campus_ssid_visible(wanted):
+        return False
+    log.info("WiFi 未连接，尝试自动连接 %s", wanted)
+    try:
+        subprocess.run(["netsh", "wlan", "connect", "name=%s" % wanted, "ssid=%s" % wanted],
+                       capture_output=True, timeout=25)
+    except Exception as e:
+        log.debug("netsh wlan connect 失败: %s", e)
+        return False
+    for _ in range(12):
+        time.sleep(1)
+        if wlan_connected():
+            log.info("WiFi 已连接")
+            return True
+    log.warning("自动连接 %s 超时", wanted)
+    return False
+
+
 def validate_config(cfg, require_credentials=True):
     """在联网或安装任务前检查常见的配置错误。"""
     for key in ("portal_host", "portal_ip", "service"):
@@ -374,6 +426,7 @@ def cmd_check(cfg, force=False):
 
 
 def cmd_login(cfg, force=False):
+    ensure_wifi(cfg)
     p = Portal(cfg)
     if not p.on_campus():
         log.debug("当前不在校园网内，跳过")
