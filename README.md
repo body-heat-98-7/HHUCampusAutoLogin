@@ -10,7 +10,7 @@
 - **换网段自适应**：`queryString` 绑定本机 IP，脚本每次从网关跳转页实时抓取，换 AP / 换楼不会失效
 - **密码 DPAPI 加密**：用当前 Windows 用户凭据加密，拷走配置文件也解不开
 - **跳过其他网络**：先检查本机地址和门户可达性，未识别为校园网时跳过认证
-- **全程留痕**：任何失败都写日志并给出可操作的原因，不会静默失败
+- **诊断信息**：认证过程写入日志，配置错误会给出提示，便于排查原因
 - **两种使用方式**：Windows 可执行版无需安装 Python；源码运行只需 Python 3.8+
 
 ## 快速开始（Windows）
@@ -132,7 +132,7 @@ Get-ItemProperty "HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Setti
 把 `ProxyEnable` 设为 0，或把 `*.hhu.edu.cn` 加入代理绕过列表。
 
 **Q：日志报"服务名不对"**
-运行 `python auto_login.py setup` 重新选择运营商。
+双击 `install.cmd` 或运行程序的 `setup` 命令，重新选择运营商。
 
 **Q：换了校区能用吗**
 默认门户和服务名来自常州校区。其他校区能否使用，取决于实际门户协议、地址、网段和服务名；可修改配置适配，尚未逐校区验证。

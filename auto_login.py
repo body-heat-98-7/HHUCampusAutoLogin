@@ -380,9 +380,9 @@ def cmd_login(cfg, force=False):
         log.error("门户要求本机设备先注册：用账号在 %s 登录一次，"
                   "或在 ePortal 自助服务里添加本机 MAC", cfg["portal_host"])
     elif "服务" in msg:
-        log.error("服务名不对，运行 `python auto_login.py setup` 重新选择运营商")
+        log.error("服务名不对，请双击 install.cmd 重新选择运营商，或运行程序的 setup 命令")
     elif "密码" in msg:
-        log.error("账号或密码不对，运行 `python auto_login.py setup` 重新填写")
+        log.error("账号或密码不对，请双击 install.cmd 重新填写，或运行程序的 setup 命令")
     return 1
 
 
