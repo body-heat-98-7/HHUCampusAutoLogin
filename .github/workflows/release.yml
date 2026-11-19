@@ -60,8 +60,4 @@ jobs:
         run: |
           gh release create "$RELEASE_TAG" release/* --verify-tag --title "$RELEASE_TAG" \
             --generate-notes \
-            --notes '**Windows 64 位免 Python 版**：下载 `windows-x64.zip`，完整解压到固定文件夹后双击 `install.cmd`。请保留两个 EXE（主程序用于配置，background 用于计划任务）。
-
-使用前请先看 README 顶部的「⚠️ 特别提醒」——尤其是用代理 / 加速器的同学。
-
-下面是本版本相对上一版的代码变更：'
+            --notes '**Windows 64 位免 Python 版**：下载 `windows-x64.zip`，完整解压到固定文件夹后双击 `install.cmd`。请保留两个 EXE（主程序用于配置，background 用于计划任务）。使用前请先看 README 顶部的「⚠️ 特别提醒」，尤其是用代理 / 加速器的同学。以下为本版本相对上一版的代码变更：'
