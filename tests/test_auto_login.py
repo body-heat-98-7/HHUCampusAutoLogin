@@ -107,8 +107,9 @@ class TaskTests(unittest.TestCase):
                     mock.patch.object(app, "cmd_login", return_value=1), \
                     contextlib.redirect_stdout(output):
                 self.assertEqual(app.cmd_install(valid_config()), 0)
-            command = run.call_args.args[0]
-            self.assertEqual(command[command.index("/TR") + 1], '"%s"' % worker)
+            commands = [c.args[0] for c in run.call_args_list if c.args]
+            create = next(c for c in commands if "/Create" in c and "/TR" in c)
+            self.assertEqual(create[create.index("/TR") + 1], '"%s"' % worker)
             self.assertIn("本次认证未成功", output.getvalue())
 
     def test_frozen_task_without_worker_uses_current_executable(self):
@@ -193,13 +194,6 @@ class WlanDetectionTests(unittest.TestCase):
         with self._fake_run("    SSID                   : Hohai University\n".encode("gbk")):
             self.assertEqual(app.current_ssid(), "Hohai University")
 
-    def test_ensure_wifi_does_not_touch_an_existing_connection(self):
-        with mock.patch.object(app, "wlan_connected", return_value=True), \
-                mock.patch.object(app, "current_ssid", return_value="Hohai University"), \
-                mock.patch.object(app, "_run") as run:
-            self.assertFalse(app.ensure_wifi(valid_config()))
-        run.assert_not_called()
-
 
 class CampusDetectionTests(unittest.TestCase):
     """开了 Clash TUN 之后，「路由到门户时的源地址」会变成 198.18.0.1，
@@ -212,7 +206,8 @@ class CampusDetectionTests(unittest.TestCase):
 
     def test_on_campus_true_when_ssid_matches(self):
         portal = app.Portal(self._cfg())
-        with mock.patch.object(app, "current_ssid", return_value="Hohai University"):
+        with mock.patch.object(app, "current_ssid", return_value="Hohai University"), \
+                mock.patch.object(app, "wlan_ip", return_value="10.113.69.145"):
             self.assertTrue(portal.on_campus())
 
     def test_on_campus_false_on_other_network(self):
@@ -220,6 +215,27 @@ class CampusDetectionTests(unittest.TestCase):
         with mock.patch.object(app, "current_ssid", return_value="体温电台"), \
                 mock.patch.object(app, "wlan_ip", return_value="172.20.10.2"):
             self.assertFalse(portal.on_campus())
+
+    def test_on_campus_does_not_skip_dhcp_when_lease_expired(self):
+        """连着校园 SSID 但 DHCP 租约过期、拿不到 IP 时，必须先去修 DHCP。
+
+        真实事故（2026-11-20 开机）：SSID 匹配就直接返回 True，跳过了 DHCP 重取，
+        结果本机没有 IP，认证必然失败，日志里反复「拿不到 queryString」。"""
+        portal = app.Portal(self._cfg())
+        with mock.patch.object(app, "current_ssid", return_value="Hohai University"), \
+                mock.patch.object(app, "wlan_ip", return_value="172.20.10.2"), \
+                mock.patch.object(portal, "_renew_dhcp", return_value=False) as renew:
+            self.assertFalse(portal.on_campus())
+        renew.assert_called_once()
+
+    def test_on_campus_recovers_after_dhcp_renew(self):
+        """重取到校园网 IP 之后应当正常返回 True。"""
+        portal = app.Portal(self._cfg())
+        with mock.patch.object(app, "current_ssid", return_value="Hohai University"), \
+                mock.patch.object(app, "wlan_ip",
+                                  side_effect=["172.20.10.2", "10.113.69.145"]), \
+                mock.patch.object(portal, "_renew_dhcp", return_value=True):
+            self.assertTrue(portal.on_campus())
 
     def test_on_campus_uses_adapter_ip_not_tun_ip(self):
         """TUN 开启时 local_ip() 是 198.18.0.1，但 wlan_ip() 应是真实网卡地址。"""
@@ -233,62 +249,41 @@ class CampusDetectionTests(unittest.TestCase):
 
 
 
-class WifiAutoConnectTests(unittest.TestCase):
-    """WiFi 断开后连回校园网的三条安全约束。
 
-    背景：v1.0.7/v1.0.8 曾有严重 bug —— WiFi 重连瞬间读不到 SSID，
-    脚本误判成"完全没连网络"，强行切到校园网，抢走用户正在用的手机热点，
-    而且每次切换又触发"网络已连接"事件，形成反复重连的死循环。
+class InterceptProbeTests(unittest.TestCase):
+    """认证前校园网 DNS 被封，只能靠纯 IP 探测拿 queryString。
+
+    真实事故（2026-11-20）：脚本用域名探测，getaddrinfo 全失败；
+    改用 urllib 访问 IP 时又被网关 RST（WinError 10054），最后用裸 socket 才拿到。
     """
 
-    def _cfg(self, **kw):
+    def test_uses_ip_probe_before_dns_probe(self):
         cfg = valid_config()
         cfg["campus_ssid"] = "Hohai University"
-        cfg.update(kw)
-        return cfg
+        portal = app.Portal(cfg)
+        body = ("HTTP/1.1 200 OK\r\n\r\n<script>top.self.location.href="
+                "'http://eportal.hhu.edu.cn/eportal/index.jsp?wlanuserip=ABC123&nasip=DEF</script>")
+        calls = []
 
-    def test_does_nothing_when_already_connected(self):
-        """已连着任何网络（热点/校园网）时绝不插手。"""
-        with mock.patch.object(app, "wlan_connected", return_value=True), \
-                mock.patch.object(app, "_run") as run:
-            self.assertFalse(app.ensure_wifi(self._cfg()))
-        run.assert_not_called()
+        def fake_raw(ip, host=None, timeout=4):
+            calls.append(ip)
+            if ip == "223.5.5.5":
+                raise OSError("reset")
+            return body
 
-    def test_waits_and_skips_when_connection_recovers(self):
-        """断开不满 5 秒就自己连回来了，不抢。"""
-        with mock.patch.object(app, "wlan_connected", side_effect=[False, True]), \
-                mock.patch.object(app.time, "sleep"), \
-                mock.patch.object(app, "_run") as run:
-            self.assertFalse(app.ensure_wifi(self._cfg()))
-        run.assert_not_called()
+        with mock.patch.object(portal, "_http_get_raw", side_effect=fake_raw):
+            qs = portal.discover_query_string()
 
-    def test_rate_limited(self):
-        """60 秒内只尝试一次，避免反复切网。"""
-        with mock.patch.object(app, "wlan_connected", return_value=False), \
-                mock.patch.object(app.time, "sleep"), \
-                mock.patch.object(app, "campus_ssid_visible", return_value=True), \
-                mock.patch.object(app, "load_json",
-                                  return_value={"wifi_connect_attempt": time.time()}), \
-                mock.patch.object(app, "save_json"), \
-                mock.patch.object(app, "_run") as run:
-            self.assertFalse(app.ensure_wifi(self._cfg()))
-        run.assert_not_called()
+        self.assertIn("wlanuserip=ABC123", qs)
+        self.assertEqual(calls[0], "223.5.5.5", "首个探测必须是纯 IP，不能依赖 DNS")
 
-    def test_can_be_disabled_via_config(self):
-        with mock.patch.object(app, "wlan_connected", return_value=False), \
-                mock.patch.object(app, "_run") as run:
-            self.assertFalse(app.ensure_wifi(self._cfg(auto_connect_wifi=False)))
-        run.assert_not_called()
+    def test_falls_through_when_no_intercept(self):
+        cfg = valid_config()
+        portal = app.Portal(cfg)
+        with mock.patch.object(portal, "_http_get_raw", return_value="HTTP/1.1 200 OK\r\n\r\nhello"):
+            qs = portal.discover_query_string()
+        self.assertEqual(qs, "")
 
-    def test_connects_when_truly_disconnected(self):
-        """真的断开且持续 5 秒、不在冷却期、能扫到校园网 → 才去连。"""
-        with mock.patch.object(app, "wlan_connected", side_effect=[False, False, True]), \
-                mock.patch.object(app.time, "sleep"), \
-                mock.patch.object(app, "campus_ssid_visible", return_value=True), \
-                mock.patch.object(app, "load_json", return_value={}), \
-                mock.patch.object(app, "save_json"), \
-                mock.patch.object(app, "_run") as run:
-            self.assertTrue(app.ensure_wifi(self._cfg()))
-        run.assert_called_once()
+
 if __name__ == "__main__":
     unittest.main()

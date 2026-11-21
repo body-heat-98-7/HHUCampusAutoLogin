@@ -40,6 +40,10 @@ import urllib.request
 from logging.handlers import RotatingFileHandler
 
 APP_NAME = "HHUCampusAutoLogin"
+STARTUP_DIR = os.path.join(os.environ.get("APPDATA", ""), "Microsoft", "Windows",
+                           "Start Menu", "Programs", "Startup")
+BOOT_VBS = "HHUCampusAutoLoginBoot.vbs"
+
 DEFAULT_TASK_NAME = APP_NAME
 IS_WINDOWS = platform.system().lower() == "windows"
 CREATE_NO_WINDOW = 0x08000000 if IS_WINDOWS else 0
@@ -83,7 +87,6 @@ DEFAULT_CONFIG = {
     "password": "",
     "service": "校园外网服务(out-campus NET)",
     "campus_ssid": "Hohai University",
-    "auto_connect_wifi": True,    # WiFi 掉线后是否尝试连回校园网
     "interval_minutes": 2,
 }
 
@@ -160,75 +163,10 @@ def wlan_connected():
 
 
 def campus_ssid_visible(ssid):
-    """校园 SSID 是否在扫描列表里（扫不到就不用等了）。"""
+    """校园 SSID 是否在扫描列表里。"""
     if not IS_WINDOWS or not ssid:
         return False
     return ssid in netsh_text(["wlan", "show", "networks"], timeout=20)
-
-
-def ensure_wifi(cfg):
-    """WiFi 掉线后尝试连回校园网。
-
-    三条安全约束，每条都对应一次真实的踩坑：
-
-    1. **只要网卡已连接就绝不插手**。曾经写成"已连接且 SSID 非空"，而 WiFi 重连
-       的那一瞬间 SSID 还读不出来，于是被误判成"完全没连网络"，脚本强行切到校园网，
-       把用户正在用的手机热点踢掉了——而且每次切换又触发"网络已连接"事件，形成死循环。
-    2. **断开要持续 5 秒才动手**，给 Windows 自己的自动重连留时间，避免抢跑。
-    3. **60 秒内最多试一次，失败后冷却 10 分钟**，防止反复切网。
-
-    config.json 里把 `auto_connect_wifi` 设为 false 可以完全关掉这个行为。
-    """
-    wanted = (cfg.get("campus_ssid") or "").strip()
-    if not wanted or not IS_WINDOWS:
-        return False
-    if not cfg.get("auto_connect_wifi", True):
-        return False
-
-    # 约束 1：已经连着任何网络（校园网、热点、家里 WiFi）都不干预
-    if wlan_connected():
-        return False
-
-    # 约束 2：断开持续 5 秒以上才认为是"真的掉了"
-    time.sleep(5)
-    if wlan_connected():
-        return False
-
-    # 约束 3：限流，避免反复切网
-    cache = load_json(CACHE_FILE)
-    now = time.time()
-    last_try = float(cache.get("wifi_connect_attempt") or 0)
-    if now - last_try < 60:
-        log.debug("距上次尝试不足 60 秒，跳过")
-        return False
-
-    if not campus_ssid_visible(wanted):
-        log.debug("扫不到 %s，跳过", wanted)
-        return False
-
-    log.info("WiFi 未连接，尝试连接 %s", wanted)
-    cache["wifi_connect_attempt"] = now
-    save_json(CACHE_FILE, cache)
-
-    try:
-        _run(["netsh", "wlan", "connect", "name=%s" % wanted, "ssid=%s" % wanted],
-             timeout=25)
-    except Exception as e:
-        log.debug("netsh wlan connect 失败: %s", e)
-        return False
-
-    for _ in range(15):
-        time.sleep(1)
-        if wlan_connected():
-            log.info("WiFi 已连接")
-            return True
-
-    log.warning("自动连接 %s 超时，10 分钟内不再重试", wanted)
-    cache["wifi_connect_attempt"] = now + 540      # 冷却 10 分钟
-    save_json(CACHE_FILE, cache)
-    return False
-
-
 
 
 def wlan_ip(alias="WLAN"):
@@ -365,22 +303,30 @@ class Portal:
 
     def on_campus(self):
         prefix = self.cfg.get("campus_ip_prefix", "10.")
-        # 首先看 SSID：这是唯一不受 TUN / 虚拟网卡干扰的判据
         wanted = (self.cfg.get("campus_ssid") or "").strip()
         ssid = current_ssid()
-        if wanted and ssid == wanted:
-            log.debug("已连接校园 SSID: %s", ssid)
-            return True
+        # SSID 是唯一不受 TUN / 虚拟网卡干扰的判据，但它不能单独作为结论：
+        # 开机时租约可能已过期（DHCP 事件 50076「未查明地址，因为租用已过期」），
+        # 此时虽然连着校园 SSID，本机却根本没有 IP。必须先把 IP 修好，否则
+        # 后续连门户必然失败（表现为日志里反复「拿不到 queryString」）。
+        on_campus_ssid = bool(wanted and ssid == wanted)
 
         ip = wlan_ip()
         if not ip.startswith(prefix):
-            # 从手机热点切回校园网时，Windows 会拿旧租约去续，常被 DHCP 服务器拒绝
-            # （DHCPNAK），表现就是"连上 WiFi 了但一直没有 IP"。这里主动重取一次。
             if self._renew_dhcp(ip):
                 ip = wlan_ip()
             if not ip.startswith(prefix):
-                log.debug("本机地址 %s 不在校园网段，跳过", ip or "未知")
+                if on_campus_ssid:
+                    log.warning("已连 %s，但未取得校园网 IP（当前 %s），下一轮重试",
+                                ssid, ip or "无")
+                else:
+                    log.debug("本机地址 %s 不在校园网段，跳过", ip or "未知")
                 return False
+
+        if on_campus_ssid:
+            return True
+
+        # SSID 不匹配但 IP 属于校园网段（例如改了名或隐藏 SSID）：仍按校园网处理
         for target in (self.ip, self.host):
             try:
                 with socket.create_connection((target, 80), timeout=3):
@@ -435,8 +381,48 @@ class Portal:
                 return m.group(1) if m.groups() else m.group(0)
         return ""
 
+    @staticmethod
+    def _http_get_raw(ip, host=None, timeout=4):
+        """用裸 socket 发浏览器式 HTTP/1.1 GET，返回响应原文。
+
+        网关拦截页对 urllib 的连接会被直接 RST（WinError 10054），但对浏览器请求正常，
+        所以这里自己拼报文；只要能抓到 wlanuserip 就够了。
+        """
+        req = ("GET / HTTP/1.1\r\nHost: %s\r\n"
+               "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+               "(KHTML, like Gecko) Chrome/120.0 Safari/537.36\r\n"
+               "Accept: text/html,application/xhtml+xml,*/*\r\n"
+               "Connection: close\r\n\r\n") % (host or ip)
+        s = socket.create_connection((ip, 80), timeout=timeout)
+        try:
+            s.sendall(req.encode("ascii"))
+            buf = b""
+            while len(buf) < 65536:
+                chunk = s.recv(4096)
+                if not chunk:
+                    break
+                buf += chunk
+        finally:
+            s.close()
+        return buf.decode("latin-1", "replace")
+
     def discover_query_string(self):
         """掉线时网关会把 HTTP 请求换成跳转页，里面带着绑定本机 IP 的 queryString。"""
+        # 认证前校园网的 DNS 是封死的（默认 DNS、网关 DNS 全部超时），
+        # 所以先用纯 IP 探测：网关对任何外网 IP 的 HTTP 请求都会回拦截页。
+        # 注意必须用裸 socket——拦截页对 urllib 会直接 RST。
+        for ip in ("223.5.5.5", "1.1.1.1", "114.114.114.114"):
+            try:
+                body = self._http_get_raw(ip)
+            except Exception as e:
+                log.debug("IP 探测 %s 失败: %s", ip, e)
+                continue
+            qs = self._extract_qs(body)
+            if qs:
+                log.info("从网关拦截页（IP %s）拿到 queryString", ip)
+                return qs
+
+        # 下面是用域名探测的兜底路径（DNS 正常时可用）
         for url, host in (("http://connect.rom.miui.com/generate_204", None),
                           ("http://www.baidu.com/", None),
                           (self.index_url, self.host)):
@@ -521,8 +507,6 @@ def cmd_check(cfg, force=False):
 def cmd_login(cfg, force=False):
     p = Portal(cfg)
     # 只在网卡确实没连上时才尝试连回校园网；连着任何网络都不插手
-    if not wlan_connected():
-        ensure_wifi(cfg)
     if not p.on_campus():
         log.debug("当前不在校园网内，跳过")
         return 0
@@ -607,6 +591,62 @@ def _task_command():
 
 
 
+def cmd_boot(cfg):
+    """开机只做一件事：连上校园 WiFi，然后完成认证。
+
+    只在「登录 Windows 后」由独立任务调用一次；日常巡检不会执行本函数，
+    因此不会在白天抢走用户正在用的热点或家里 WiFi。
+    """
+    wanted = (cfg.get("campus_ssid") or "").strip()
+    prefix = cfg.get("campus_ip_prefix", "10.")
+    p = Portal(cfg)
+
+    ssid_now = current_ssid()
+    if wlan_connected() and ssid_now != wanted:
+        # 已经连着手机热点或家里 WiFi：绝对不抢，直接退出。
+        # 「开机自动连校园网」只在完全没有网络连接时才生效。
+        log.info("当前连着 %s，不干预", ssid_now or "其他网络")
+        return 0
+
+    if not wlan_connected():
+        connected = False
+        for attempt in range(3):
+            if not campus_ssid_visible(wanted):
+                log.warning("第 %d 次：扫描不到 %s", attempt + 1, wanted)
+                time.sleep(15)
+                continue
+            log.info("正在连接 %s（第 %d 次）", wanted, attempt + 1)
+            try:
+                _run(["netsh", "wlan", "connect", "name=%s" % wanted, "ssid=%s" % wanted],
+                     timeout=30)
+            except Exception as e:
+                log.warning("连接命令失败: %s", e)
+            for _ in range(25):
+                time.sleep(1)
+                if current_ssid() == wanted:
+                    connected = True
+                    break
+            if connected:
+                break
+            time.sleep(10)
+        if not connected:
+            log.warning("连接 %s 失败，本次放弃", wanted)
+            return 1
+        log.info("已连上 %s", wanted)
+
+    ip = wlan_ip()
+    if not ip.startswith(prefix):
+        log.info("本机 IP 是 %s，重新获取租约", ip or "无")
+        p._renew_dhcp(ip)
+        ip = wlan_ip()
+    if not ip.startswith(prefix):
+        log.warning("仍拿不到校园网 IP（%s），本次放弃", ip or "无")
+        return 1
+    log.info("校园网 IP: %s", ip)
+
+    return cmd_login(cfg, force=True)
+
+
 def cmd_install(cfg, task_name=DEFAULT_TASK_NAME):
     if not IS_WINDOWS:
         print("非 Windows 平台，请用 cron 定时执行本脚本，例如：\n"
@@ -635,8 +675,28 @@ def cmd_install(cfg, task_name=DEFAULT_TASK_NAME):
     event_ok = r2.returncode == 0
     print((r2.stdout + r2.stderr).decode("gbk", "replace").strip())
 
+    # 3) 开机任务：放进启动文件夹，登录 Windows 时自动跑一次（不需要管理员）
+    boot_ok = False
+    try:
+        if not os.path.isdir(STARTUP_DIR):
+            os.makedirs(STARTUP_DIR, exist_ok=True)
+        boot_path = os.path.join(STARTUP_DIR, BOOT_VBS)
+        py = _pythonw() if not getattr(sys, "frozen", False) else sys.executable
+        script = os.path.abspath(__file__) if not getattr(sys, "frozen", False) else ""
+        args = ('"%s" "%s" boot' % (py, script)).strip() if script else '"%s" boot' % py
+        with open(boot_path, "w", encoding="utf-8") as f:
+            f.write('CreateObject("WScript.Shell").Run "%s", 0, False\r\n' % args.replace('"', '""'))
+        boot_ok = os.path.isfile(boot_path)
+        # 清掉旧版本可能留下的开机任务
+        _run(["schtasks", "/Delete", "/TN", task_name + "-Boot", "/F"], capture_output=True)
+        print("已创建开机启动项: %s" % boot_path)
+    except Exception as e:
+        print("创建开机启动项失败: %s" % e)
+
     print("\n已安装：")
     print("  · %s —— 每 %d 分钟兜底巡检" % (task_name, minutes))
+    if boot_ok:
+        print("  · 启动文件夹 %s —— 登录 Windows 时自动连校园网并认证（只跑一次）" % BOOT_VBS)
     if event_ok:
         print("  · %s —— 网络连上时立即触发（断线恢复是秒级）" % event_task)
     else:
@@ -650,7 +710,7 @@ def cmd_install(cfg, task_name=DEFAULT_TASK_NAME):
 
 def cmd_uninstall(task_name=DEFAULT_TASK_NAME):
     ok = True
-    for name in (task_name, task_name + "-OnConnect"):
+    for name in (task_name, task_name + "-OnConnect", task_name + "-Boot"):
         r = _run(["schtasks", "/Delete", "/TN", name, "/F"], capture_output=True)
         out = (r.stdout + r.stderr).decode("gbk", "replace").strip()
         print(out)
@@ -719,7 +779,7 @@ def cmd_setup():
 def build_parser():
     ap = argparse.ArgumentParser(description="河海大学校园网自动认证")
     ap.add_argument("command", nargs="?", default="login",
-                    choices=["login", "check", "setup", "install", "uninstall", "logout"])
+                    choices=["boot", "login", "check", "setup", "install", "uninstall", "logout"])
     ap.add_argument("--verbose", action="store_true", help="输出调试日志")
     ap.add_argument("--force", action="store_true", help="忽略已在线，强制重新认证")
     ap.add_argument("--task-name", default=DEFAULT_TASK_NAME, help="计划任务名")
@@ -752,6 +812,8 @@ def main():
 
     if args.command == "install":
         return cmd_install(cfg, args.task_name)
+    if args.command == "boot":
+        return cmd_boot(cfg)
     if args.command == "logout":
         return cmd_logout(cfg)
     if args.command == "check":
