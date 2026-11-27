@@ -285,5 +285,50 @@ class InterceptProbeTests(unittest.TestCase):
         self.assertEqual(qs, "")
 
 
+
+class BootStartupTests(unittest.TestCase):
+    """开机启动项：引用的文件不存在时绝不能写，否则开机会弹「找不到文件」。
+
+    真实事故（2026-11-27）：vbs 里写的是早已删除的 .venv\\Scripts\\python.exe，
+    而且没带脚本路径，每次开机都弹一次文件缺失窗口。
+    """
+
+    def test_skips_vbs_when_referenced_file_missing(self):
+        with tempfile.TemporaryDirectory(prefix="boot vbs ") as directory:
+            startup = os.path.join(directory, "Startup")
+            out = io.StringIO()
+            with mock.patch.object(app, "STARTUP_DIR", startup), \
+                    mock.patch.object(app, "IS_WINDOWS", True), \
+                    mock.patch.object(app, "_task_command",
+                                      return_value='"C:\\nope\\pythonw.exe" "C:\\nope\\auto_login.py"'), \
+                    mock.patch.object(app, "_run",
+                                      return_value=subprocess.CompletedProcess([], 0, b"", b"")), \
+                    mock.patch.object(app, "cmd_login", return_value=0), \
+                    contextlib.redirect_stdout(out):
+                app.cmd_install(valid_config())
+            self.assertFalse(os.path.exists(os.path.join(startup, app.BOOT_VBS)))
+            self.assertIn("开机启动项未创建", out.getvalue())
+
+    def test_vbs_contains_file_guard(self):
+        with tempfile.TemporaryDirectory(prefix="boot vbs2 ") as directory:
+            startup = os.path.join(directory, "Startup")
+            fake_py = os.path.join(directory, "pythonw.exe")
+            fake_script = os.path.join(directory, "auto_login.py")
+            open(fake_py, "wb").close()
+            open(fake_script, "wb").close()
+            with mock.patch.object(app, "STARTUP_DIR", startup), \
+                    mock.patch.object(app, "IS_WINDOWS", True), \
+                    mock.patch.object(app, "_task_command",
+                                      return_value='"%s" "%s"' % (fake_py, fake_script)), \
+                    mock.patch.object(app, "_run",
+                                      return_value=subprocess.CompletedProcess([], 0, b"", b"")), \
+                    mock.patch.object(app, "cmd_login", return_value=0), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                app.cmd_install(valid_config())
+            path = os.path.join(startup, app.BOOT_VBS)
+            self.assertTrue(os.path.exists(path))
+            text = open(path, encoding="utf-8").read()
+            self.assertIn("FileExists", text, "vbs 必须自带文件校验，缺文件时静默退出")
+            self.assertIn(" boot", text)
 if __name__ == "__main__":
     unittest.main()

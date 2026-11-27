@@ -681,15 +681,37 @@ def cmd_install(cfg, task_name=DEFAULT_TASK_NAME):
         if not os.path.isdir(STARTUP_DIR):
             os.makedirs(STARTUP_DIR, exist_ok=True)
         boot_path = os.path.join(STARTUP_DIR, BOOT_VBS)
-        py = _pythonw() if not getattr(sys, "frozen", False) else sys.executable
-        script = os.path.abspath(__file__) if not getattr(sys, "frozen", False) else ""
-        args = ('"%s" "%s" boot' % (py, script)).strip() if script else '"%s" boot' % py
-        with open(boot_path, "w", encoding="utf-8") as f:
-            f.write('CreateObject("WScript.Shell").Run "%s", 0, False\r\n' % args.replace('"', '""'))
-        boot_ok = os.path.isfile(boot_path)
+
+        # 统一用 _task_command() 拼命令（它已经处理好后台 exe / pythonw + 脚本路径），
+        # 写启动项之前先确认引用的文件都在，否则开机会弹"找不到文件"。
+        boot_cmd = _task_command() + " boot"
+        referenced = re.findall(r'"([^"]+)"', boot_cmd)
+        missing = [p for p in referenced if not os.path.isfile(p)]
+
+        if missing:
+            print("开机启动项未创建：找不到 %s" % "、".join(missing))
+            print("  请重新运行 install.cmd；若已移动过安装目录，先卸载再安装。")
+        else:
+            # vbs 自己也要校验文件：以后就算整个文件夹被挪走/删掉，
+            # 也只是静默退出，不会在开机时弹「找不到文件」。
+            cond = " And ".join(
+                'fso.FileExists("%s")' % p.replace('"', '""') for p in referenced
+            ) or "True"
+            vbs = (
+                'On Error Resume Next\r\n'
+                'Set fso = CreateObject("Scripting.FileSystemObject")\r\n'
+                'Set sh = CreateObject("WScript.Shell")\r\n'
+                'If %s Then sh.Run "%s", 0, False\r\n'
+                % (cond, boot_cmd.replace('"', '""'))
+            )
+            with open(boot_path, "w", encoding="utf-8", newline="") as f:
+                f.write(vbs)
+            boot_ok = os.path.isfile(boot_path)
+            print("已创建开机启动项: %s" % boot_path)
+            print("  命令: %s" % boot_cmd)
+
         # 清掉旧版本可能留下的开机任务
         _run(["schtasks", "/Delete", "/TN", task_name + "-Boot", "/F"], capture_output=True)
-        print("已创建开机启动项: %s" % boot_path)
     except Exception as e:
         print("创建开机启动项失败: %s" % e)
 
