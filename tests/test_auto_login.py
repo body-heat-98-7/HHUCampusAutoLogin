@@ -100,6 +100,7 @@ class TaskTests(unittest.TestCase):
             worker.touch()
             output = io.StringIO()
             with mock.patch.object(app, "BASE_DIR", directory), \
+            mock.patch.object(app, "STARTUP_DIR", os.path.join(directory, "Startup")), \
                     mock.patch.object(app, "IS_WINDOWS", True), \
                     mock.patch.object(sys, "frozen", True, create=True), \
                     mock.patch.object(app.subprocess, "run", return_value=
