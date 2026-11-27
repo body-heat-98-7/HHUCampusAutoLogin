@@ -78,6 +78,85 @@ KNOWN_SERVICES = [
     ("中国联通 (CUCC NET)", "中国联通(常州)"),
 ]
 
+# 只看"真正的代理客户端"：进程名里带 service 的后台服务不算。
+PROXY_CLIENT_HINTS = ("0dcloudcore", "0dcloud.exe", "clash", "mihomo", "verge-mihomo",
+                      "v2ray", "v2raya", "sing-box", "xray", "shadowsocks", "trojan", "naive")
+
+
+def _proxy_client_running():
+    """有没有代理客户端在运行（不含后台服务）。
+
+    拿不到进程列表时保守返回 True —— 宁可不动，也不要误关用户正在用的代理。
+    """
+    try:
+        r = _run(["tasklist"], capture_output=True, timeout=15)
+        raw = r.stdout or b""
+        txt = raw.decode("gbk", "replace")
+        if "\ufffd" in txt or not txt.strip():
+            txt = raw.decode("utf-8", "replace")
+        for line in txt.splitlines():
+            name = line.strip().split(" ")[0].lower()
+            if not name or name.startswith("\u4fe1\u606f") or name == "image":
+                continue
+            # 后台服务（0dcloudService.exe 之类）不算"客户端在运行"
+            if "service" in name:
+                continue
+            if any(h in name for h in PROXY_CLIENT_HINTS):
+                return True
+        return False
+    except Exception:
+        return True
+
+
+def heal_dead_proxy():
+    """系统代理开着、却没有任何代理客户端在运行时，把系统代理关掉。
+
+    真实事故（2026-11-19、11-27）：代理软件的「服务」开机会把系统代理写好，
+    真正干活的客户端并没有启动，于是所有走系统代理的程序（浏览器、.NET、
+    证书吊销检查）全部连到死端口——表现为"WiFi 信号满格却没网"，
+    而 QQ / 微信（不走系统代理）照常能用。
+
+    安全边界（很重要）：
+    - 只要有任意代理客户端在运行，本函数立刻返回，绝不改动任何设置；
+    - 只有在"代理开着 + 一个代理进程都没有"时才关闭，不会影响正常使用代理。
+    """
+    if not IS_WINDOWS:
+        return False
+    try:
+        import winreg
+    except Exception:
+        return False
+
+    sub = r"Software\Microsoft\Windows\CurrentVersion\Internet Settings"
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, sub, 0,
+                            winreg.KEY_READ | winreg.KEY_WRITE) as key:
+            try:
+                enabled, _ = winreg.QueryValueEx(key, "ProxyEnable")
+            except FileNotFoundError:
+                return False
+            if not int(enabled):
+                return False
+
+            # 关键：代理软件正在用，就不要动
+            if _proxy_client_running():
+                log.debug("检测到代理客户端在运行，不干预系统代理")
+                return False
+
+            try:
+                server, _ = winreg.QueryValueEx(key, "ProxyServer")
+            except FileNotFoundError:
+                server = ""
+
+            winreg.SetValueEx(key, "ProxyEnable", 0, winreg.REG_DWORD, 0)
+            log.warning("系统代理指向 %s，但没有任何代理程序在运行，已自动关闭"
+                        "（否则浏览器会整机断网）", server or "(空)")
+            return True
+    except Exception as e:
+        log.debug("检查系统代理失败: %s", e)
+        return False
+
+
 DEFAULT_CONFIG = {
     "portal_host": "eportal.hhu.edu.cn",
     "portal_ip": "10.96.0.155",
@@ -811,6 +890,10 @@ def build_parser():
 def main():
     args = build_parser().parse_args()
     setup_logging(args.verbose)
+
+    # 先填掉「死代理」这个坑（只在一个代理程序都没运行时才动手）
+    if args.command not in ("setup", "uninstall"):
+        heal_dead_proxy()
 
     if args.command == "setup":
         return cmd_setup()

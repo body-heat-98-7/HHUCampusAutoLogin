@@ -331,5 +331,38 @@ class BootStartupTests(unittest.TestCase):
             text = open(path, encoding="utf-8").read()
             self.assertIn("FileExists", text, "vbs 必须自带文件校验，缺文件时静默退出")
             self.assertIn(" boot", text)
+
+class DeadProxyTests(unittest.TestCase):
+    """死代理自愈：只在一个代理客户端都没运行时才关系统代理。
+
+    真实事故：0dcloud 的服务（0dcloudService.exe）开机会写好系统代理，
+    但客户端没启动，于是浏览器、.NET、证书吊销检查全部连到死端口，
+    表现为「WiFi 信号满格却没网」，而 QQ/微信照常能用。
+    """
+
+    def _fake_tasklist(self, text):
+        return mock.Mock(returncode=0, stdout=text.encode("gbk"), stderr=b"")
+
+    def test_service_alone_is_not_a_client(self):
+        out = "0dcloudService.exe   6636 Services   0   6,416 K\n"
+        with mock.patch.object(app, "_run", return_value=self._fake_tasklist(out)):
+            self.assertFalse(app._proxy_client_running())
+
+    def test_core_process_counts_as_client(self):
+        out = "0dcloudCore.exe   1234 Console   1   50,000 K\n"
+        with mock.patch.object(app, "_run", return_value=self._fake_tasklist(out)):
+            self.assertTrue(app._proxy_client_running())
+
+    def test_conservative_when_tasklist_fails(self):
+        with mock.patch.object(app, "_run", side_effect=OSError("no tasklist")):
+            self.assertTrue(app._proxy_client_running(), "拿不到进程列表时必须保守不动")
+
+    def test_clash_and_mihomo_are_clients(self):
+        for name in ("clash-verge.exe", "verge-mihomo.exe", "v2ray.exe"):
+            out = name + "   1 Console   1   10,000 K\n"
+            with mock.patch.object(app, "_run", return_value=self._fake_tasklist(out)):
+                self.assertTrue(app._proxy_client_running(), name)
+
+
 if __name__ == "__main__":
     unittest.main()
